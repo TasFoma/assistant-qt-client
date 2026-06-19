@@ -1,0 +1,31 @@
+# Папки сборки
+build/
+Debug/
+Release/
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.obj
+*.idb
+*.pch
+*.tlog
+*.lastbuildstate
+*.log
+
+# Qt Creator / VS Code
+*.user
+*.user.*
+.vscode/
+.qtcreator/
+CMakeLists.txt.user
+CMakeUserPresets.json
+
+# Временные файлы
+*.tmp
+*.bak
+*.swp
+*~
+*.autosave
