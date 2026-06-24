@@ -8,11 +8,16 @@
 #include <QFile>
 #include <QDateTime>
 #include <QTextStream>
+#include <QUrl>
+#include <QUrlQuery>
 
 LlamaClient::LlamaClient(QObject *parent) : QObject(parent)
 {
     m_manager = new QNetworkAccessManager(this);
     connect(m_manager, &QNetworkAccessManager::finished, this, &LlamaClient::onReplyFinished);
+
+    m_searchManager = new QNetworkAccessManager(this);
+    connect(m_searchManager, &QNetworkAccessManager::finished, this, &LlamaClient::onSearchReplyFinished);
 }
 
 void LlamaClient::sendMessageWithHistory(const QString &message,
@@ -21,8 +26,6 @@ void LlamaClient::sendMessageWithHistory(const QString &message,
                                          const QString &modelName)
 {
     QJsonObject request;
-
-    // Системный промпт
     QString systemPrompt =
         "Ты — мой личный ментор и друг. Ты помогаешь мне становиться лучше, спокойнее и организованнее. "
         "Ты помнишь, что я рассказываю о себе, и учитываешь это в ответах. "
@@ -42,7 +45,6 @@ void LlamaClient::sendMessageWithHistory(const QString &message,
     request["top_p"] = 0.9;
     request["stop"] = QJsonArray::fromStringList({"<|im_end|>", "Пользователь:"});
 
-    // ДОБАВЛЯЕМ ВЫБОР МОДЕЛИ
     if (!modelName.isEmpty()) {
         request["model"] = modelName;
     }
@@ -60,11 +62,164 @@ void LlamaClient::sendMessageWithHistory(const QString &message,
     m_manager->post(req, data);
 }
 
+void LlamaClient::searchAndAnswer(const QString &question,
+                                  const QString &serverUrl,
+                                  const QString &history,
+                                  const QString &modelName)
+{
+    m_lastQuestion = question;
+    m_lastServerUrl = serverUrl;
+    m_lastHistory = history;
+    m_lastModelName = modelName;
+
+    logToFile("=== ПОИСК В ИНТЕРНЕТЕ ===");
+    logToFile("Запрос: " + question);
+
+    QUrl url("http://localhost:8081/search");
+    QUrlQuery query;
+    query.addQueryItem("q", question);
+    query.addQueryItem("format", "json");
+    url.setQuery(query);
+
+    QNetworkRequest request(url);
+    request.setRawHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    request.setRawHeader("Accept", "application/json, text/plain, */*");
+    request.setRawHeader("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7");
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+
+    m_searchManager->get(request);
+}
+
+void LlamaClient::onSearchReplyFinished(QNetworkReply *reply)
+{
+    if (reply->error() != QNetworkReply::NoError) {
+        QString error = "Ошибка поиска: " + reply->errorString();
+        logToFile("=== ОШИБКА ПОИСКА ===");
+        logToFile(error);
+        logToFile("");
+        sendMessageWithHistory(m_lastQuestion, m_lastServerUrl, m_lastHistory, m_lastModelName);
+        reply->deleteLater();
+        return;
+    }
+
+    QByteArray data = reply->readAll();
+    logToFile("=== СЫРОЙ ОТВЕТ ОТ SEARXNG ===");
+    logToFile(QString::fromUtf8(data));
+    logToFile("");
+
+    QJsonParseError parseError;
+    QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
+    if (parseError.error != QJsonParseError::NoError) {
+        logToFile("=== ОШИБКА ПАРСИНГА JSON ===");
+        logToFile("Ошибка: " + parseError.errorString());
+        logToFile("Сырые данные: " + QString::fromUtf8(data));
+        logToFile("");
+        sendMessageWithHistory(m_lastQuestion, m_lastServerUrl, m_lastHistory, m_lastModelName);
+        reply->deleteLater();
+        return;
+    }
+
+    if (!doc.isObject()) {
+        logToFile("=== ОШИБКА: Документ не объект ===");
+        sendMessageWithHistory(m_lastQuestion, m_lastServerUrl, m_lastHistory, m_lastModelName);
+        reply->deleteLater();
+        return;
+    }
+
+    QJsonObject obj = doc.object();
+    QJsonArray results = obj["results"].toArray();
+
+    if (results.isEmpty()) {
+        logToFile("=== НЕТ РЕЗУЛЬТАТОВ ===");
+        sendMessageWithHistory(m_lastQuestion, m_lastServerUrl, m_lastHistory, m_lastModelName);
+        reply->deleteLater();
+        return;
+    }
+
+    // Формируем результаты с реальным содержанием
+    QString searchResults;
+    int count = 0;
+    for (const QJsonValue &val : results) {
+        if (count >= 3) break;
+        QJsonObject result = val.toObject();
+        QString title = result["title"].toString();
+        QString content = result["content"].toString();
+        QString url = result["url"].toString();
+
+        if (title.isEmpty()) continue;
+
+        if (content.length() > 300) {
+            content = content.left(300) + "...";
+        }
+
+        searchResults += QString("--- Результат %1 ---\n")
+                         .arg(count + 1);
+        searchResults += QString("Заголовок: %1\n").arg(title);
+        if (!content.isEmpty()) {
+            searchResults += QString("Содержание: %1\n").arg(content);
+        }
+        searchResults += QString("Источник: %1\n").arg(url);
+        searchResults += "\n";
+        count++;
+    }
+
+    if (searchResults.isEmpty()) {
+        logToFile("=== НЕТ ПОДХОДЯЩИХ РЕЗУЛЬТАТОВ ===");
+        sendMessageWithHistory(m_lastQuestion, m_lastServerUrl, m_lastHistory, m_lastModelName);
+        reply->deleteLater();
+        return;
+    }
+
+    // ✅ ДОБАВЛЯЕМ ИСТОРИЮ В ПРОМПТ
+    QString systemPrompt =
+        "Ты — помощник, который отвечает строго на основе предоставленной информации из поиска.\n\n"
+        "История диалога:\n" + m_lastHistory + "\n"    // <<< ВОТ ЭТО ДОБАВЛЕНО
+        "Вот результаты поиска по запросу пользователя:\n\n" +
+        searchResults +
+        "\n\nВопрос пользователя: " + m_lastQuestion +
+        "\n\nТвоя задача: дать точный ответ, используя ТОЛЬКО информацию из результатов выше. "
+        "Если в результатах нет ответа на вопрос — скажи честно: 'В результатах поиска нет информации по этому вопросу'. "
+        "Не придумывай факты, не додумывай. Используй только то, что написано в результатах.\n"
+        "Учитывай историю диалога, чтобы отвечать последовательно и связно.\n\n"
+        "Ответ:";
+
+    sendToLlama(systemPrompt, m_lastServerUrl, m_lastModelName);
+    reply->deleteLater();
+}
+
+
+void LlamaClient::sendToLlama(const QString &prompt, const QString &serverUrl, const QString &modelName)
+{
+    QJsonObject request;
+    request["prompt"] = prompt;
+    request["n_predict"] = 300;
+    request["temperature"] = 0.2;          // Очень низкая температура для фактов
+    request["repeat_penalty"] = 1.2;
+    request["top_p"] = 0.9;
+    request["stop"] = QJsonArray::fromStringList({"<|im_end|>", "Пользователь:"});
+
+    if (!modelName.isEmpty()) {
+        request["model"] = modelName;
+    }
+
+    QNetworkRequest req(QUrl(serverUrl + "/completion"));
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+    QJsonDocument doc(request);
+    QByteArray data = doc.toJson();
+
+    logToFile("=== ЗАПРОС В LLAMA (с результатами поиска) ===");
+    logToFile(QString::fromUtf8(data));
+    logToFile("");
+
+    m_manager->post(req, data);
+}
+
 void LlamaClient::onReplyFinished(QNetworkReply *reply)
 {
     if (reply->error() != QNetworkReply::NoError) {
         QString error = reply->errorString();
-        logToFile("=== ОШИБКА ===");
+        logToFile("=== ОШИБКА LLAMA ===");
         logToFile(error);
         logToFile("");
         emit errorOccurred(error);
@@ -73,8 +228,7 @@ void LlamaClient::onReplyFinished(QNetworkReply *reply)
     }
 
     QByteArray responseData = reply->readAll();
-
-    logToFile("=== ОТВЕТ ===");
+    logToFile("=== ОТВЕТ ОТ LLAMA ===");
     logToFile(QString::fromUtf8(responseData));
     logToFile("");
 
@@ -82,25 +236,6 @@ void LlamaClient::onReplyFinished(QNetworkReply *reply)
     if (doc.isObject()) {
         QJsonObject obj = doc.object();
         QString content = obj["content"].toString();
-
-        // Парсим токены и скорость
-        int tokensPredicted = obj["tokens_predicted"].toInt();
-        int tokensEvaluated = obj["tokens_evaluated"].toInt();
-
-        // Время генерации (если есть)
-        QJsonObject timings = obj["timings"].toObject();
-        double predictedMs = timings["predicted_ms"].toDouble();
-        double predictedPerSecond = (predictedMs > 0) ? (tokensPredicted / (predictedMs / 1000.0)) : 0;
-
-        // Сохраняем метаданные в лог
-        QString meta = QString("Токенов предсказано: %1, Оценено: %2, Скорость: %3 т/с")
-                       .arg(tokensPredicted)
-                       .arg(tokensEvaluated)
-                       .arg(predictedPerSecond, 0, 'f', 2);
-        logToFile("=== МЕТА ===");
-        logToFile(meta);
-        logToFile("");
-
         emit responseReceived(content);
     } else {
         emit errorOccurred("Ошибка разбора ответа");

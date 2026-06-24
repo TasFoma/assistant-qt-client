@@ -17,16 +17,28 @@ public:
                                             const QString &history,
                                             const QString &modelName);
 
+    Q_INVOKABLE void searchAndAnswer(const QString &question,
+                                     const QString &serverUrl,
+                                     const QString &history,
+                                     const QString &modelName);
+
 signals:
     void responseReceived(const QString &response);
     void errorOccurred(const QString &error);
 
 private slots:
     void onReplyFinished(QNetworkReply *reply);
+    void onSearchReplyFinished(QNetworkReply *reply);
 
 private:
-    QNetworkAccessManager *m_manager;
+    QNetworkAccessManager *m_manager;        // для LLAMA
+    QNetworkAccessManager *m_searchManager;  // для SearXNG
+    QString m_lastQuestion;
+    QString m_lastServerUrl;
+    QString m_lastHistory;
+    QString m_lastModelName;
     void logToFile(const QString &text);
+    void sendToLlama(const QString &prompt, const QString &serverUrl, const QString &modelName);
 };
 
 #endif // LLAMACLIENT_H

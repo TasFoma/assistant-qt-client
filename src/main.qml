@@ -12,20 +12,24 @@ ApplicationWindow {
     property string history: ""
     property string currentModel: "Qwen2.5-7B.Q4_K_M"
 
+    readonly property color userColor: "#007AFF"
+    readonly property color userBubble: "#DCF8C6"
+    readonly property color assistantBubble: "#F0F0F0"
+    readonly property color accentColor: "#007AFF"
+
     ColumnLayout {
         anchors.fill: parent
-        spacing: 8
+        spacing: 0
 
-        // Шапка с переключателем
+        // ШАПКА
         Rectangle {
             Layout.fillWidth: true
-            height: 100
-            color: "#007AFF"
-            radius: 0
+            height: 90
+            color: accentColor
 
             Column {
                 anchors.centerIn: parent
-                spacing: 6
+                spacing: 4
 
                 Text {
                     text: "🧠 Ассистент (Qwen)"
@@ -47,7 +51,6 @@ ApplicationWindow {
                     Switch {
                         id: modelSwitch
                         checked: false
-
                         onCheckedChanged: {
                             if (checked) {
                                 currentModel = "qwen2.5-14b-q4_k_m"
@@ -70,25 +73,25 @@ ApplicationWindow {
                     id: statusText
                     text: "🚀 Быстрый режим (7B)"
                     color: "white"
-                    font.pixelSize: 12
+                    font.pixelSize: 11
                     opacity: 0.8
                 }
             }
         }
 
-        // Список сообщений
+        // СПИСОК СООБЩЕНИЙ
         ListView {
             id: messageListView
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: 8
+            spacing: 10
             clip: true
             model: messageModel
             delegate: messageDelegate
             ScrollBar.vertical: ScrollBar {}
         }
 
-        // Индикатор загрузки
+        // ИНДИКАТОР ЗАГРУЗКИ
         Row {
             visible: loadingIndicator.visible
             spacing: 8
@@ -98,33 +101,44 @@ ApplicationWindow {
             BusyIndicator {
                 id: busyIndicator
                 running: loadingIndicator.visible
-                width: 24
-                height: 24
+                width: 20
+                height: 20
             }
 
             Text {
                 text: "Ассистент печатает..."
                 color: "#666"
                 font.italic: true
+                font.pixelSize: 13
             }
         }
 
-        // Поле ввода
-        RowLayout {
+        // ПОЛЕ ВВОДА
+        Rectangle {
             Layout.fillWidth: true
-            Layout.margins: 8
-            spacing: 8
+            height: 60
+            color: "white"
+            border.color: "#E0E0E0"
+            border.width: 1
 
-            TextField {
-                id: inputField
-                Layout.fillWidth: true
-                placeholderText: "Напишите сообщение..."
-                onAccepted: sendMessage()
-            }
+            RowLayout {
+                anchors.fill: parent
+                anchors.margins: 8
+                spacing: 8
 
-            Button {
-                text: "Отправить"
-                onClicked: sendMessage()
+                TextField {
+                    id: inputField
+                    Layout.fillWidth: true
+                    placeholderText: "Напишите сообщение..."
+                    font.pixelSize: 15
+                    onAccepted: sendMessage()
+                }
+
+                Button {
+                    text: "Отправить"
+                    font.pixelSize: 14
+                    onClicked: sendMessage()
+                }
             }
         }
     }
@@ -137,25 +151,25 @@ ApplicationWindow {
     }
 
     function sendMessage() {
-        const text = inputField.text.trim()
-        if (!text) return
+    const text = inputField.text.trim()
+    if (!text) return
 
-        const now = new Date()
-        const timeStr = now.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    const now = new Date()
+    const timeStr = now.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })
 
-        messageModel.append({ text: text, isUser: true, time: timeStr })
-        inputField.clear()
-        loadingIndicator.visible = true
+    messageModel.append({ text: text, isUser: true, time: timeStr })
+    inputField.clear()
+    loadingIndicator.visible = true
 
-        llamaClient.sendMessageWithHistory(text, serverUrl, history, currentModel)
-    }
+    llamaClient.searchAndAnswer(text, serverUrl, history, currentModel)
+}
 
     Connections {
         target: llamaClient
 
         function onResponseReceived(response) {
             const now = new Date()
-            const timeStr = now.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+            const timeStr = now.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })
 
             loadingIndicator.visible = false
             messageModel.append({ text: response, isUser: false, time: timeStr })
@@ -178,32 +192,61 @@ ApplicationWindow {
 
     Component {
         id: messageDelegate
-        Rectangle {
+        Item {
             width: parent ? parent.width : 0
-            height: messageColumn.height + 20
-            color: isUser ? "#DCF8C6" : "#F0F0F0"
-            radius: 16
-            Layout.leftMargin: isUser ? parent.width / 3 : 8
-            Layout.rightMargin: isUser ? 8 : parent.width / 3
-            Layout.alignment: isUser ? Qt.AlignRight : Qt.AlignLeft
+            height: Math.max(50, row.implicitHeight + 16)
 
-            Column {
-                id: messageColumn
-                anchors.centerIn: parent
-                spacing: 2
+            Row {
+                id: row
+                anchors {
+                    left: isUser ? undefined : parent.left
+                    right: isUser ? parent.right : undefined
+                    margins: 8
+                }
+                spacing: 8
 
-                Text {
-                    text: model.text
-                    wrapMode: Text.Wrap
-                    width: parent.width - 20
-                    font.pixelSize: 16
+                Rectangle {
+                    width: 36
+                    height: 36
+                    radius: 18
+                    color: isUser ? userColor : "#999"
+                    visible: true
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: isUser ? "👤" : "🧠"
+                        font.pixelSize: 18
+                    }
                 }
 
-                Text {
-                    text: model.time || ""
-                    color: "#888"
-                    font.pixelSize: 10
-                    horizontalAlignment: isUser ? Text.AlignRight : Text.AlignLeft
+                Rectangle {
+                    width: Math.min(messageText.implicitWidth + 24, parent.parent.width * 0.65)
+                    height: Math.max(40, messageColumn.implicitHeight + 16)
+                    color: isUser ? userBubble : assistantBubble
+                    radius: 12
+
+                    Column {
+                        id: messageColumn
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        spacing: 2
+
+                        Text {
+                            id: messageText
+                            text: model.text
+                            wrapMode: Text.Wrap
+                            width: parent.width
+                            font.pixelSize: 15
+                            color: "#1A1A1A"
+                        }
+
+                        Text {
+                            text: model.time || ""
+                            color: "#888"
+                            font.pixelSize: 10
+                            horizontalAlignment: isUser ? Text.AlignRight : Text.AlignLeft
+                        }
+                    }
                 }
             }
         }
