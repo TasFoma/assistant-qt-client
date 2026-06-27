@@ -31,8 +31,8 @@ private slots:
     void onSearchReplyFinished(QNetworkReply *reply);
 
 private:
-    QNetworkAccessManager *m_manager;        // для LLAMA
-    QNetworkAccessManager *m_searchManager;  // для SearXNG
+    QNetworkAccessManager *m_manager;
+    QNetworkAccessManager *m_searchManager;
     QString m_lastQuestion;
     QString m_lastServerUrl;
     QString m_lastHistory;

@@ -51,6 +51,7 @@ void LlamaClient::sendMessageWithHistory(const QString &message,
 
     QNetworkRequest req(QUrl(serverUrl + "/completion"));
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    req.setTransferTimeout(120000); // 2 min — give the model time to load and generate
 
     QJsonDocument doc(request);
     QByteArray data = doc.toJson();
@@ -86,6 +87,7 @@ void LlamaClient::searchAndAnswer(const QString &question,
     request.setRawHeader("Accept", "application/json, text/plain, */*");
     request.setRawHeader("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7");
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    request.setTransferTimeout(10000); // 10 s — SearXNG is local, should be instant
 
     m_searchManager->get(request);
 }
@@ -162,26 +164,19 @@ void LlamaClient::onSearchReplyFinished(QNetworkReply *reply)
         searchResults += "\n";
         count++;
     }
-
-    if (searchResults.isEmpty()) {
+ if (searchResults.isEmpty()) {
         logToFile("=== НЕТ ПОДХОДЯЩИХ РЕЗУЛЬТАТОВ ===");
         sendMessageWithHistory(m_lastQuestion, m_lastServerUrl, m_lastHistory, m_lastModelName);
         reply->deleteLater();
         return;
     }
 
-    // ✅ ДОБАВЛЯЕМ ИСТОРИЮ В ПРОМПТ
+    // ✅ КОРОТКИЙ И ЧЁТКИЙ ПРОМПТ
     QString systemPrompt =
-        "Ты — помощник, который отвечает строго на основе предоставленной информации из поиска.\n\n"
-        "История диалога:\n" + m_lastHistory + "\n"    // <<< ВОТ ЭТО ДОБАВЛЕНО
-        "Вот результаты поиска по запросу пользователя:\n\n" +
-        searchResults +
-        "\n\nВопрос пользователя: " + m_lastQuestion +
-        "\n\nТвоя задача: дать точный ответ, используя ТОЛЬКО информацию из результатов выше. "
-        "Если в результатах нет ответа на вопрос — скажи честно: 'В результатах поиска нет информации по этому вопросу'. "
-        "Не придумывай факты, не додумывай. Используй только то, что написано в результатах.\n"
-        "Учитывай историю диалога, чтобы отвечать последовательно и связно.\n\n"
-        "Ответ:";
+        "Используй информацию из результатов поиска, чтобы ответить на вопрос.\n\n"
+        "Результаты поиска:\n" + searchResults +
+        "\nВопрос: " + m_lastQuestion +
+        "\nОтвет (кратко, по фактам):";
 
     sendToLlama(systemPrompt, m_lastServerUrl, m_lastModelName);
     reply->deleteLater();
@@ -193,10 +188,11 @@ void LlamaClient::sendToLlama(const QString &prompt, const QString &serverUrl, c
     QJsonObject request;
     request["prompt"] = prompt;
     request["n_predict"] = 300;
-    request["temperature"] = 0.2;          // Очень низкая температура для фактов
+    request["temperature"] = 0.2;
     request["repeat_penalty"] = 1.2;
     request["top_p"] = 0.9;
-    request["stop"] = QJsonArray::fromStringList({"<|im_end|>", "Пользователь:"});
+    // Убираем stop, чтобы модель не обрывала ответ на "Пользователь:"
+    // request["stop"] = QJsonArray::fromStringList({"<|im_end|>", "Пользователь:"});
 
     if (!modelName.isEmpty()) {
         request["model"] = modelName;
@@ -204,6 +200,7 @@ void LlamaClient::sendToLlama(const QString &prompt, const QString &serverUrl, c
 
     QNetworkRequest req(QUrl(serverUrl + "/completion"));
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    req.setTransferTimeout(120000); // 2 min
 
     QJsonDocument doc(request);
     QByteArray data = doc.toJson();

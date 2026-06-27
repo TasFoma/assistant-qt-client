@@ -21,7 +21,6 @@ ApplicationWindow {
         anchors.fill: parent
         spacing: 0
 
-        // ШАПКА
         Rectangle {
             Layout.fillWidth: true
             height: 90
@@ -79,7 +78,6 @@ ApplicationWindow {
             }
         }
 
-        // СПИСОК СООБЩЕНИЙ
         ListView {
             id: messageListView
             Layout.fillWidth: true
@@ -91,7 +89,6 @@ ApplicationWindow {
             ScrollBar.vertical: ScrollBar {}
         }
 
-        // ИНДИКАТОР ЗАГРУЗКИ
         Row {
             visible: loadingIndicator.visible
             spacing: 8
@@ -113,7 +110,6 @@ ApplicationWindow {
             }
         }
 
-        // ПОЛЕ ВВОДА
         Rectangle {
             Layout.fillWidth: true
             height: 60
@@ -129,9 +125,51 @@ ApplicationWindow {
                 TextField {
                     id: inputField
                     Layout.fillWidth: true
-                    placeholderText: "Напишите сообщение..."
+                    placeholderText: "Напишите или скажите сообщение..."
                     font.pixelSize: 15
                     onAccepted: sendMessage()
+                }
+
+                Button {
+                    id: voiceButton
+                    text: voiceInput.isRecording ? "⏹"
+                        : voiceInput.isReady     ? "🎤"
+                                                 : "⏳"
+                    font.pixelSize: 18
+                    implicitWidth: 44
+                    implicitHeight: 44
+                    enabled: voiceInput.isReady || voiceInput.isRecording
+
+                    background: Rectangle {
+                        radius: 8
+                        color: voiceInput.isRecording ? "#FF3B30"
+                             : voiceInput.isReady     ? (voiceButton.pressed ? "#C0C0C0" : "#E8E8E8")
+                                                      : "#D0D0D0"
+                    }
+
+                    SequentialAnimation on opacity {
+                        running: voiceInput.isRecording
+                        loops: Animation.Infinite
+                        NumberAnimation { to: 0.35; duration: 550; easing.type: Easing.InOutSine }
+                        NumberAnimation { to: 1.0;  duration: 550; easing.type: Easing.InOutSine }
+                        onStopped: voiceButton.opacity = 1.0
+                    }
+
+                    // Spinner while model is loading
+                    RotationAnimation on rotation {
+                        running: !voiceInput.isReady && !voiceInput.isRecording
+                        loops: Animation.Infinite
+                        from: 0; to: 360; duration: 1200
+                        onStopped: voiceButton.rotation = 0
+                    }
+
+                    onClicked: {
+                        if (voiceInput.isRecording) {
+                            voiceInput.stopRecording()
+                        } else {
+                            voiceInput.startRecording()
+                        }
+                    }
                 }
 
                 Button {
@@ -151,18 +189,32 @@ ApplicationWindow {
     }
 
     function sendMessage() {
-    const text = inputField.text.trim()
-    if (!text) return
+        const text = inputField.text.trim()
+        if (!text) return
 
-    const now = new Date()
-    const timeStr = now.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })
+        const now = new Date()
+        const timeStr = now.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })
 
-    messageModel.append({ text: text, isUser: true, time: timeStr })
-    inputField.clear()
-    loadingIndicator.visible = true
+        messageModel.append({ text: text, isUser: true, time: timeStr })
+        inputField.clear()
+        loadingIndicator.visible = true
 
-    llamaClient.searchAndAnswer(text, serverUrl, history, currentModel)
-}
+        llamaClient.searchAndAnswer(text, serverUrl, history, currentModel)
+    }
+
+    Connections {
+        target: voiceInput
+
+        function onTextRecognized(text) {
+            inputField.text = text
+            sendMessage()
+        }
+
+        function onErrorOccurred(error) {
+            console.warn("Voice error:", error)
+            inputField.placeholderText = "Ошибка микрофона"
+        }
+    }
 
     Connections {
         target: llamaClient
@@ -181,6 +233,9 @@ ApplicationWindow {
             if (history.length > 1000) {
                 history = history.substring(history.length - 1000)
             }
+
+            // Озвучивание — пока отключено, чтобы не мешало
+            // voiceInput.speak(response)
         }
 
         function onErrorOccurred(error) {
