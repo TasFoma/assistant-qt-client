@@ -3,6 +3,7 @@
 #include <QFileInfo>
 #include <QDebug>
 #include <QProcessEnvironment>
+#include <QStringConverter>
 
 static const char PYTHON_EXE[] = "C:/Users/nasty/AppData/Local/Python/bin/python.exe";
 
@@ -25,7 +26,8 @@ VoiceInput::~VoiceInput()
 }
 
 bool VoiceInput::isRecording() const { return m_isRecording; }
-bool VoiceInput::isReady() const     { return m_isReady; }
+bool VoiceInput::isReady()     const { return m_isReady; }
+bool VoiceInput::isSpeaking()  const { return m_isSpeaking; }
 
 void VoiceInput::setRecording(bool value)
 {
@@ -39,6 +41,13 @@ void VoiceInput::setReady(bool value)
     if (m_isReady == value) return;
     m_isReady = value;
     emit isReadyChanged();
+}
+
+void VoiceInput::setSpeaking(bool value)
+{
+    if (m_isSpeaking == value) return;
+    m_isSpeaking = value;
+    emit isSpeakingChanged();
 }
 
 QString VoiceInput::findScript(const QString &name)
@@ -184,28 +193,75 @@ void VoiceInput::stopRecording()
     sendCommand("STOP");
 }
 
-void VoiceInput::speak(const QString &text)
+// UTF-16LE Base64 для -EncodedCommand
+static QString toEncodedPS(const QString &script)
+{
+    QStringEncoder enc(QStringEncoder::Utf16LE);
+    const QByteArray utf16le = enc.encode(script);
+    return QString::fromLatin1(utf16le.toBase64());
+}
+
+void VoiceInput::stopSpeaking()
+{
+    if (m_speakProcess) {
+        QProcess *old = m_speakProcess;
+        m_speakProcess = nullptr;
+        old->disconnect();
+        if (old->state() != QProcess::NotRunning) {
+            old->kill();
+            connect(old, &QProcess::finished, old, &QProcess::deleteLater);
+        } else {
+            old->deleteLater();
+        }
+    }
+    setSpeaking(false);
+}
+
+void VoiceInput::speak(const QString &text, int rate)
 {
     if (text.isEmpty()) return;
 
-    if (m_speakProcess && m_speakProcess->state() != QProcess::NotRunning)
-        m_speakProcess->kill();
+    stopSpeaking(); // kill any ongoing speech first
 
-    QString escaped = text;
-    escaped.replace("'", "''");
-    escaped.replace("\"", "`\"");
+    // Escape single quotes; everything else is literal in PS single-quoted strings
+    const QString escaped = QString(text).replace("'", "''");
+    const QString rateStr  = QString::number(qBound(-10, rate, 10));
 
-    QString command = QString(
-        "Add-Type -AssemblyName System.Speech; "
-        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-        "$rv = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Culture.Name -match '^ru' } | Select-Object -First 1; "
-        "if ($rv) { $s.SelectVoice($rv.VoiceInfo.Name) }; "
-        "$s.Rate = 0; "
-        "$s.Speak('%1')"
-    ).arg(escaped);
+    // Voice selection priority:
+    //   1. Russian male  (Pavel — if installed via Windows language settings)
+    //   2. Any male      (David / Mark / etc.)
+    //   3. Russian female (Irina — usually pre-installed)
+    //   4. First available
+    // SSML prosody adds slight pitch variation for a less robotic feel.
+    const QString script = QString(
+        "Add-Type -AssemblyName System.Speech\n"
+        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer\n"
+        "$vs = $s.GetInstalledVoices() | Where-Object { $_.Enabled }\n"
+        "$v  = $vs | Where-Object { $_.VoiceInfo.Culture.Name -match '^ru' -and $_.VoiceInfo.Gender -eq 'Male'   } | Select-Object -First 1\n"
+        "if (-not $v) { $v = $vs | Where-Object { $_.VoiceInfo.Gender -eq 'Male'   } | Select-Object -First 1 }\n"
+        "if (-not $v) { $v = $vs | Where-Object { $_.VoiceInfo.Culture.Name -match '^ru' } | Select-Object -First 1 }\n"
+        "if (-not $v) { $v = $vs | Select-Object -First 1 }\n"
+        "if ($v) { $s.SelectVoice($v.VoiceInfo.Name) }\n"
+        "$s.Rate = %2\n"
+        // Try SSML for slightly more natural prosody; fall back to plain Speak on error
+        "$xml = '<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\" xml:lang=\"ru-RU\">"
+                "<prosody pitch=\"+2%\">%1</prosody></speak>'\n"
+        "try { $s.SpeakSsml($xml) } catch { $s.Speak('%1') }"
+    ).arg(escaped, rateStr);
 
     auto *proc = new QProcess(this);
     m_speakProcess = proc;
-    connect(proc, &QProcess::finished, proc, &QProcess::deleteLater);
-    proc->start("powershell.exe", QStringList() << "-NoProfile" << "-NonInteractive" << "-Command" << command);
+    setSpeaking(true);
+
+    connect(proc, &QProcess::finished, this, [this, proc] {
+        if (m_speakProcess == proc) {
+            m_speakProcess = nullptr;
+            setSpeaking(false);
+        }
+        proc->deleteLater();
+    });
+
+    proc->start("powershell.exe",
+                QStringList{"-NonInteractive", "-NoProfile",
+                            "-EncodedCommand", toEncodedPS(script)});
 }

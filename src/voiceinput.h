@@ -8,44 +8,49 @@
 class VoiceInput : public QObject
 {
     Q_OBJECT
-    // true while a recording session is active (START sent, not yet DONE)
     Q_PROPERTY(bool isRecording READ isRecording NOTIFY isRecordingChanged)
-    // true once the daemon has loaded the model and is ready for commands
-    Q_PROPERTY(bool isReady READ isReady NOTIFY isReadyChanged)
+    Q_PROPERTY(bool isReady     READ isReady     NOTIFY isReadyChanged)
+    Q_PROPERTY(bool isSpeaking  READ isSpeaking  NOTIFY isSpeakingChanged)
 
 public:
     explicit VoiceInput(QObject *parent = nullptr);
     ~VoiceInput() override;
 
     bool isRecording() const;
-    bool isReady() const;
+    bool isReady()     const;
+    bool isSpeaking()  const;
 
     Q_INVOKABLE void startRecording();
     Q_INVOKABLE void stopRecording();
-    Q_INVOKABLE void speak(const QString &text);
+    // rate: SAPI rate -10..10 (0=normal, 2=~1.3x, 4=~1.7x, 6=~2x)
+    Q_INVOKABLE void speak(const QString &text, int rate = 2);
+    Q_INVOKABLE void stopSpeaking();
 
 signals:
     void textRecognized(const QString &text);
     void errorOccurred(const QString &error);
     void isRecordingChanged();
     void isReadyChanged();
+    void isSpeakingChanged();
 
 private:
-    bool     m_isRecording = false;
-    bool     m_isReady = false;
-    bool     m_pendingStart = false; // user pressed mic before READY
+    bool     m_isRecording  = false;
+    bool     m_isReady      = false;
+    bool     m_isSpeaking   = false;
+    bool     m_pendingStart = false;
     QString  m_stderrBuffer;
-    QProcess *m_daemon = nullptr;
+    QProcess *m_daemon       = nullptr;
     QProcess *m_speakProcess = nullptr;
-    QTimer   *m_watchdog = nullptr;
+    QTimer   *m_watchdog     = nullptr;
 
     void startDaemon();
     void startWatchdog();
     void sendCommand(const QString &cmd);
     void setRecording(bool value);
     void setReady(bool value);
+    void setSpeaking(bool value);
 
-    static bool isVoskLog(const QString &line);
+    static bool    isVoskLog(const QString &line);
     static QString findScript(const QString &name);
 };
 

@@ -10,17 +10,21 @@ ApplicationWindow {
 
     property string serverUrl: "http://192.168.0.100:8080"
     property string history: ""
-    property string currentModel: "Qwen2.5-7B.Q4_K_M"
+    property string currentModel: "qwen2.5-14b-q4_k_m"
+    property bool   ttsEnabled: true
+    // SAPI rate 0/2/4/6 → ≈ 1x / 1.3x / 1.7x / 2x
+    property int    ttsRate: 2
 
-    readonly property color userColor: "#007AFF"
-    readonly property color userBubble: "#DCF8C6"
+    readonly property color userColor:       "#007AFF"
+    readonly property color userBubble:      "#DCF8C6"
     readonly property color assistantBubble: "#F0F0F0"
-    readonly property color accentColor: "#007AFF"
+    readonly property color accentColor:     "#007AFF"
 
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
 
+        // ── Шапка ────────────────────────────────────────────────────────────
         Rectangle {
             Layout.fillWidth: true
             height: 90
@@ -35,6 +39,7 @@ ApplicationWindow {
                     color: "white"
                     font.pixelSize: 20
                     font.bold: true
+                    anchors.horizontalCenter: parent.horizontalCenter
                 }
 
                 Row {
@@ -45,11 +50,12 @@ ApplicationWindow {
                         text: "🚀 Быстро"
                         color: modelSwitch.checked ? "#B0D4F1" : "white"
                         font.bold: !modelSwitch.checked
+                        anchors.verticalCenter: parent.verticalCenter
                     }
 
                     Switch {
                         id: modelSwitch
-                        checked: false
+                        checked: true          // 14B по умолчанию
                         onCheckedChanged: {
                             if (checked) {
                                 currentModel = "qwen2.5-14b-q4_k_m"
@@ -65,19 +71,22 @@ ApplicationWindow {
                         text: "🧠 Умно"
                         color: modelSwitch.checked ? "white" : "#B0D4F1"
                         font.bold: modelSwitch.checked
+                        anchors.verticalCenter: parent.verticalCenter
                     }
                 }
 
                 Text {
                     id: statusText
-                    text: "🚀 Быстрый режим (7B)"
+                    text: "🧠 Умный режим (14B)"
                     color: "white"
                     font.pixelSize: 11
                     opacity: 0.8
+                    anchors.horizontalCenter: parent.horizontalCenter
                 }
             }
         }
 
+        // ── Список сообщений ─────────────────────────────────────────────────
         ListView {
             id: messageListView
             Layout.fillWidth: true
@@ -89,6 +98,7 @@ ApplicationWindow {
             ScrollBar.vertical: ScrollBar {}
         }
 
+        // ── Индикатор «печатает» ─────────────────────────────────────────────
         Row {
             visible: loadingIndicator.visible
             spacing: 8
@@ -96,20 +106,21 @@ ApplicationWindow {
             Layout.bottomMargin: 4
 
             BusyIndicator {
-                id: busyIndicator
                 running: loadingIndicator.visible
                 width: 20
                 height: 20
             }
 
             Text {
-                text: "Ассистент печатает..."
+                text: "Ассистент думает..."
                 color: "#666"
                 font.italic: true
                 font.pixelSize: 13
+                anchors.verticalCenter: parent.verticalCenter
             }
         }
 
+        // ── Панель ввода ─────────────────────────────────────────────────────
         Rectangle {
             Layout.fillWidth: true
             height: 60
@@ -120,61 +131,137 @@ ApplicationWindow {
             RowLayout {
                 anchors.fill: parent
                 anchors.margins: 8
-                spacing: 8
+                spacing: 6
 
                 TextField {
                     id: inputField
                     Layout.fillWidth: true
-                    placeholderText: "Напишите или скажите сообщение..."
+                    placeholderText: voiceInput && voiceInput.isRecording
+                                     ? "🎤 Слушаю... говорите"
+                                     : "Напишите или скажите сообщение..."
                     font.pixelSize: 15
                     onAccepted: sendMessage()
                 }
 
+                // ── Скорость речи ─────────────────────────────────────────
+                Button {
+                    id: rateButton
+                    // cycle: 1x → 1.3x → 1.7x → 2x → 1x
+                    readonly property var labels: ["1x", "1.3x", "1.7x", "2x"]
+                    readonly property var rates:  [0,    2,      4,      6   ]
+                    readonly property int  idx:   rates.indexOf(ttsRate)
+                    text: labels[idx < 0 ? 0 : idx]
+                    font.pixelSize: 11
+                    implicitWidth: 38
+                    implicitHeight: 44
+                    background: Rectangle {
+                        radius: 8
+                        color: rateButton.pressed ? "#B0B0B0" : "#E8E8E8"
+                    }
+                    onClicked: {
+                        const next = (idx + 1) % rates.length
+                        ttsRate = rates[next]
+                    }
+                }
+
+                // ── TTS-кнопка ────────────────────────────────────────────
+                // ⏸ пока говорит (нажать = замолчать)
+                // 🔊 включена, молчит  (нажать = выкл)
+                // 🔇 выключена         (нажать = вкл)
+                Button {
+                    id: ttsButton
+                    readonly property bool speaking: voiceInput && voiceInput.isSpeaking
+                    text: speaking ? "⏸" : ttsEnabled ? "🔊" : "🔇"
+                    font.pixelSize: 16
+                    implicitWidth: 40
+                    implicitHeight: 44
+                    background: Rectangle {
+                        radius: 8
+                        color: ttsButton.speaking
+                               ? (ttsButton.pressed ? "#C0392B" : "#E74C3C")   // красный — стоп
+                               : ttsEnabled
+                                 ? (ttsButton.pressed ? "#28A745" : "#34C759") // зелёный — вкл
+                                 : (ttsButton.pressed ? "#B0B0B0" : "#E8E8E8") // серый  — выкл
+                    }
+                    // Пульсация пока говорит
+                    SequentialAnimation on opacity {
+                        running: ttsButton.speaking
+                        loops: Animation.Infinite
+                        NumberAnimation { to: 0.5; duration: 600; easing.type: Easing.InOutSine }
+                        NumberAnimation { to: 1.0; duration: 600; easing.type: Easing.InOutSine }
+                        onStopped: ttsButton.opacity = 1.0
+                    }
+                    onClicked: {
+                        if (speaking) {
+                            if (voiceInput) voiceInput.stopSpeaking()
+                        } else {
+                            ttsEnabled = !ttsEnabled
+                        }
+                    }
+                }
+
+                // ── Кнопка микрофона ──────────────────────────────────────
                 Button {
                     id: voiceButton
-                    text: voiceInput.isRecording ? "⏹"
-                        : voiceInput.isReady     ? "🎤"
-                                                 : "⏳"
+                    // ⏳ пока демон грузит модель, 🎤 готов, ⏹ запись идёт
+                    text: (voiceInput && voiceInput.isRecording)          ? "⏹"
+                        : (voiceInput && !voiceInput.isReady)             ? "⏳"
+                                                                          : "🎤"
                     font.pixelSize: 18
                     implicitWidth: 44
                     implicitHeight: 44
-                    enabled: voiceInput.isReady || voiceInput.isRecording
+                    enabled: !voiceInput || voiceInput.isReady || voiceInput.isRecording
 
                     background: Rectangle {
                         radius: 8
-                        color: voiceInput.isRecording ? "#FF3B30"
-                             : voiceInput.isReady     ? (voiceButton.pressed ? "#C0C0C0" : "#E8E8E8")
-                                                      : "#D0D0D0"
+                        color: voiceInput && voiceInput.isRecording ? "#FF3B30"
+                             : voiceButton.enabled && voiceButton.pressed ? "#C0C0C0"
+                             : voiceButton.enabled                        ? "#E8E8E8"
+                                                                          : "#D0D0D0"
                     }
 
+                    // Пульсация во время записи
                     SequentialAnimation on opacity {
-                        running: voiceInput.isRecording
+                        running: voiceInput && voiceInput.isRecording
                         loops: Animation.Infinite
                         NumberAnimation { to: 0.35; duration: 550; easing.type: Easing.InOutSine }
                         NumberAnimation { to: 1.0;  duration: 550; easing.type: Easing.InOutSine }
                         onStopped: voiceButton.opacity = 1.0
                     }
 
-                    // Spinner while model is loading
+                    // Вращение пока модель грузится
                     RotationAnimation on rotation {
-                        running: !voiceInput.isReady && !voiceInput.isRecording
+                        running: voiceInput && !voiceInput.isReady && !voiceInput.isRecording
                         loops: Animation.Infinite
-                        from: 0; to: 360; duration: 1200
+                        from: 0; to: 360; duration: 1500
                         onStopped: voiceButton.rotation = 0
                     }
 
                     onClicked: {
-                        if (voiceInput.isRecording) {
+                        if (voiceInput && voiceInput.isRecording) {
                             voiceInput.stopRecording()
-                        } else {
+                        } else if (voiceInput) {
                             voiceInput.startRecording()
                         }
                     }
                 }
 
                 Button {
-                    text: "Отправить"
-                    font.pixelSize: 14
+                    text: "→"
+                    font.pixelSize: 18
+                    implicitWidth: 40
+                    implicitHeight: 44
+                    background: Rectangle {
+                        radius: 8
+                        color: parent.pressed ? "#0056CC" : accentColor
+                    }
+                    contentItem: Text {
+                        text: parent.text
+                        font: parent.font
+                        color: "white"
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
                     onClicked: sendMessage()
                 }
             }
@@ -202,6 +289,7 @@ ApplicationWindow {
         llamaClient.searchAndAnswer(text, serverUrl, history, currentModel)
     }
 
+    // ── Сигналы голосового ввода ─────────────────────────────────────────────
     Connections {
         target: voiceInput
 
@@ -212,10 +300,14 @@ ApplicationWindow {
 
         function onErrorOccurred(error) {
             console.warn("Voice error:", error)
-            inputField.placeholderText = "Ошибка микрофона"
+            const now = new Date()
+            const timeStr = now.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })
+            messageModel.append({ text: "🎤 " + error, isUser: false, time: timeStr })
+            messageListView.positionViewAtEnd()
         }
     }
 
+    // ── Сигналы ответа ассистента ────────────────────────────────────────────
     Connections {
         target: llamaClient
 
@@ -228,23 +320,26 @@ ApplicationWindow {
             messageListView.positionViewAtEnd()
 
             const lastUserMessage = messageModel.get(messageModel.count - 2).text
-            history += "Пользователь: " + lastUserMessage + "\nАссистент: " + response + "\n"
-
-            if (history.length > 1000) {
-                history = history.substring(history.length - 1000)
+            // ChatML format so the model sees proper turn structure
+            history += "<|im_start|>user\n" + lastUserMessage + "\n<|im_end|>\n"
+                     + "<|im_start|>assistant\n" + response + "\n<|im_end|>\n"
+            if (history.length > 4000) {
+                history = history.substring(history.length - 4000)
             }
 
-            // Озвучивание — пока отключено, чтобы не мешало
-            // voiceInput.speak(response)
+            if (ttsEnabled && voiceInput) voiceInput.speak(response, ttsRate)
         }
 
         function onErrorOccurred(error) {
             loadingIndicator.visible = false
-            messageModel.append({ text: "❌ Ошибка: " + error, isUser: false, time: "" })
+            const now = new Date()
+            const timeStr = now.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })
+            messageModel.append({ text: "❌ " + error, isUser: false, time: timeStr })
             messageListView.positionViewAtEnd()
         }
     }
 
+    // ── Делегат сообщения ────────────────────────────────────────────────────
     Component {
         id: messageDelegate
         Item {
@@ -254,18 +349,15 @@ ApplicationWindow {
             Row {
                 id: row
                 anchors {
-                    left: isUser ? undefined : parent.left
-                    right: isUser ? parent.right : undefined
+                    left:    isUser ? undefined : parent.left
+                    right:   isUser ? parent.right : undefined
                     margins: 8
                 }
                 spacing: 8
 
                 Rectangle {
-                    width: 36
-                    height: 36
-                    radius: 18
+                    width: 36; height: 36; radius: 18
                     color: isUser ? userColor : "#999"
-                    visible: true
 
                     Text {
                         anchors.centerIn: parent

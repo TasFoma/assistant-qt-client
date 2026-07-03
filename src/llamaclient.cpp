@@ -26,24 +26,27 @@ void LlamaClient::sendMessageWithHistory(const QString &message,
                                          const QString &modelName)
 {
     QJsonObject request;
-    QString systemPrompt =
-        "Ты — мой личный ментор и друг. Ты помогаешь мне становиться лучше, спокойнее и организованнее. "
-        "Ты помнишь, что я рассказываю о себе, и учитываешь это в ответах. "
-        "Ты поддерживаешь меня в трудные моменты, помогаешь справляться с негативом и самобичеванием. "
-        "Ты напоминаешь мне о важном, подбадриваешь и направляешь. "
-        "Если я злюсь или расстроена — ты помогаешь мне успокоиться и посмотреть на ситуацию иначе. "
-        "Ты не даёшь советов без спроса, но всегда готова помочь. "
-        "Ты общаешься тепло, но без слащавости. "
-        "Ты не придумываешь диалог за меня. Ты отвечаешь только от своего имени.";
-
-    QString fullPrompt = systemPrompt + "\n\n" + history + "Пользователь: " + message + "\nАссистент:";
+    // Системный промпт в формате ChatML, который понимает Qwen
+    QString fullPrompt =
+        "<|im_start|>system\n"
+        "Ты — личный ИИ-ассистент. Отвечай умно, точно и по-русски.\n"
+        "Правила:\n"
+        "• Давай конкретные ответы — без воды и лишних оговорок.\n"
+        "• Если вопрос фактический — отвечай фактами; если личный — с теплом.\n"
+        "• Не придумывай диалог за пользователя, не повторяй вопрос.\n"
+        "• Если не знаешь — честно скажи, не выдумывай.\n"
+        "<|im_end|>\n"
+        + (history.isEmpty() ? "" : history)
+        + "<|im_start|>user\n" + message + "\n<|im_end|>\n"
+        "<|im_start|>assistant\n";
 
     request["prompt"] = fullPrompt;
-    request["n_predict"] = 300;
-    request["temperature"] = 0.7;
-    request["repeat_penalty"] = 1.15;
+    request["n_predict"] = 600;
+    request["temperature"] = 0.6;
+    request["repeat_penalty"] = 1.1;
     request["top_p"] = 0.9;
-    request["stop"] = QJsonArray::fromStringList({"<|im_end|>", "Пользователь:"});
+    request["top_k"] = 40;
+    request["stop"] = QJsonArray::fromStringList({"<|im_end|>", "<|im_start|>"});
 
     if (!modelName.isEmpty()) {
         request["model"] = modelName;
@@ -171,14 +174,19 @@ void LlamaClient::onSearchReplyFinished(QNetworkReply *reply)
         return;
     }
 
-    // ✅ КОРОТКИЙ И ЧЁТКИЙ ПРОМПТ
-    QString systemPrompt =
-        "Используй информацию из результатов поиска, чтобы ответить на вопрос.\n\n"
+    // ChatML-промпт для поиска
+    QString searchPrompt =
+        "<|im_start|>system\n"
+        "Ты — точный и лаконичный ассистент. Используй результаты поиска, чтобы дать точный ответ. "
+        "Не выдумывай факты вне приведённых источников. Отвечай по-русски.\n"
+        "<|im_end|>\n"
+        "<|im_start|>user\n"
         "Результаты поиска:\n" + searchResults +
-        "\nВопрос: " + m_lastQuestion +
-        "\nОтвет (кратко, по фактам):";
+        "\nВопрос: " + m_lastQuestion + "\n"
+        "<|im_end|>\n"
+        "<|im_start|>assistant\n";
 
-    sendToLlama(systemPrompt, m_lastServerUrl, m_lastModelName);
+    sendToLlama(searchPrompt, m_lastServerUrl, m_lastModelName);
     reply->deleteLater();
 }
 
@@ -187,12 +195,12 @@ void LlamaClient::sendToLlama(const QString &prompt, const QString &serverUrl, c
 {
     QJsonObject request;
     request["prompt"] = prompt;
-    request["n_predict"] = 300;
-    request["temperature"] = 0.2;
-    request["repeat_penalty"] = 1.2;
+    request["n_predict"] = 600;
+    request["temperature"] = 0.2;   // низкая для фактических ответов с поиском
+    request["repeat_penalty"] = 1.1;
     request["top_p"] = 0.9;
-    // Убираем stop, чтобы модель не обрывала ответ на "Пользователь:"
-    // request["stop"] = QJsonArray::fromStringList({"<|im_end|>", "Пользователь:"});
+    request["top_k"] = 40;
+    request["stop"] = QJsonArray::fromStringList({"<|im_end|>", "<|im_start|>"});
 
     if (!modelName.isEmpty()) {
         request["model"] = modelName;
@@ -232,7 +240,23 @@ void LlamaClient::onReplyFinished(QNetworkReply *reply)
     QJsonDocument doc = QJsonDocument::fromJson(responseData);
     if (doc.isObject()) {
         QJsonObject obj = doc.object();
-        QString content = obj["content"].toString();
+        QString content = obj["content"].toString().trimmed();
+
+        // Strip ChatML overflow: stop tokens don't always fire in time,
+        // and the model can generate the next user turn after its own response.
+        // Truncate at the first ChatML marker that isn't part of a valid reply.
+        for (const QString &marker : {
+                 QStringLiteral("<|im_end|>"),
+                 QStringLiteral("<|im_start|>"),
+                 QStringLiteral("Пользователь:")}) {
+            int idx = content.indexOf(marker);
+            if (idx != -1)
+                content = content.left(idx).trimmed();
+        }
+
+        if (content.isEmpty())
+            content = "(нет ответа)";
+
         emit responseReceived(content);
     } else {
         emit errorOccurred("Ошибка разбора ответа");
