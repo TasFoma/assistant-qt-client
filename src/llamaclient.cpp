@@ -20,44 +20,70 @@ LlamaClient::LlamaClient(QObject *parent) : QObject(parent)
     connect(m_searchManager, &QNetworkAccessManager::finished, this, &LlamaClient::onSearchReplyFinished);
 }
 
+void LlamaClient::setSystemContext(const QString &context)
+{
+    m_systemContext = context;
+}
+
 void LlamaClient::sendMessageWithHistory(const QString &message,
                                          const QString &serverUrl,
-                                         const QString &history,
+                                         const QVariantList &history,
                                          const QString &modelName)
 {
-    QJsonObject request;
-    // Системный промпт в формате ChatML, который понимает Qwen
-    QString fullPrompt =
-        "<|im_start|>system\n"
-        "Ты — личный ИИ-ассистент. Отвечай умно, точно и по-русски.\n"
+    sendChat(message, serverUrl, history, modelName, 0.6);
+}
+
+void LlamaClient::sendChat(const QString &userContent,
+                           const QString &serverUrl,
+                           const QVariantList &history,
+                           const QString &modelName,
+                           double temperature,
+                           const QString &extraSystem)
+{
+    QString systemPrompt =
+        "Ты — «Мой спутник», личный ИИ-ассистент и друг. Отвечай умно, точно и по-русски.\n"
         "Правила:\n"
         "• Давай конкретные ответы — без воды и лишних оговорок.\n"
-        "• Если вопрос фактический — отвечай фактами; если личный — с теплом.\n"
-        "• Не придумывай диалог за пользователя, не повторяй вопрос.\n"
+        "• Если вопрос фактический — отвечай фактами; если личный — с теплом и заботой.\n"
+        "• Отвечай ТОЛЬКО за себя. Никогда не пиши реплики за пользователя.\n"
         "• Если не знаешь — честно скажи, не выдумывай.\n"
-        "<|im_end|>\n"
-        + (history.isEmpty() ? "" : history)
-        + "<|im_start|>user\n" + message + "\n<|im_end|>\n"
-        "<|im_start|>assistant\n";
+        "• Можно использовать уместные эмодзи, но не перебарщивай.";
+    if (!m_systemContext.isEmpty())
+        systemPrompt += "\n\nКонтекст:\n" + m_systemContext;
+    if (!extraSystem.isEmpty())
+        systemPrompt += "\n\n" + extraSystem;
 
-    request["prompt"] = fullPrompt;
-    request["n_predict"] = 600;
-    request["temperature"] = 0.6;
-    request["repeat_penalty"] = 1.1;
-    request["top_p"] = 0.9;
-    request["top_k"] = 40;
-    request["stop"] = QJsonArray::fromStringList({"<|im_end|>", "<|im_start|>"});
-
-    if (!modelName.isEmpty()) {
-        request["model"] = modelName;
+    QJsonArray messages;
+    messages.append(QJsonObject{{"role", "system"}, {"content", systemPrompt}});
+    for (const QVariant &v : history) {
+        const QVariantMap m = v.toMap();
+        const QString role = m.value("role").toString();
+        const QString text = m.value("text").toString();
+        if (text.isEmpty() || (role != "user" && role != "assistant"))
+            continue;
+        messages.append(QJsonObject{{"role", role}, {"content", text}});
     }
+    messages.append(QJsonObject{{"role", "user"}, {"content", userContent}});
 
-    QNetworkRequest req(QUrl(serverUrl + "/completion"));
+    QJsonObject request;
+    request["messages"]       = messages;
+    request["max_tokens"]     = 600;
+    request["temperature"]    = temperature;
+    request["top_p"]          = 0.9;
+    request["top_k"]          = 40;
+    request["repeat_penalty"] = 1.1; // без него слабые модели зацикливаются
+    // Страховка для моделей со сломанным EOS: режем по ChatML-маркерам
+    request["stop"] = QJsonArray::fromStringList({"<|im_end|>", "<|im_start|>"});
+    request["stream"]         = false;
+    if (!modelName.isEmpty())
+        request["model"] = modelName;
+
+    QNetworkRequest req(QUrl(serverUrl + "/v1/chat/completions"));
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-    req.setTransferTimeout(120000); // 2 min — give the model time to load and generate
+    // 5 мин: при переключении 7B↔14B серверу нужно время перечитать модель с диска
+    req.setTransferTimeout(300000);
 
-    QJsonDocument doc(request);
-    QByteArray data = doc.toJson();
+    const QByteArray data = QJsonDocument(request).toJson();
 
     logToFile("=== ЗАПРОС (модель: " + modelName + ") ===");
     logToFile(QString::fromUtf8(data));
@@ -68,7 +94,7 @@ void LlamaClient::sendMessageWithHistory(const QString &message,
 
 void LlamaClient::searchAndAnswer(const QString &question,
                                   const QString &serverUrl,
-                                  const QString &history,
+                                  const QVariantList &history,
                                   const QString &modelName)
 {
     m_lastQuestion = question;
@@ -90,179 +116,109 @@ void LlamaClient::searchAndAnswer(const QString &question,
     request.setRawHeader("Accept", "application/json, text/plain, */*");
     request.setRawHeader("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7");
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    request.setTransferTimeout(10000); // 10 s — SearXNG is local, should be instant
+    request.setTransferTimeout(10000); // 10 s — SearXNG локальный, должен отвечать мгновенно
 
     m_searchManager->get(request);
 }
 
 void LlamaClient::onSearchReplyFinished(QNetworkReply *reply)
 {
-    if (reply->error() != QNetworkReply::NoError) {
-        QString error = "Ошибка поиска: " + reply->errorString();
-        logToFile("=== ОШИБКА ПОИСКА ===");
-        logToFile(error);
-        logToFile("");
-        sendMessageWithHistory(m_lastQuestion, m_lastServerUrl, m_lastHistory, m_lastModelName);
-        reply->deleteLater();
-        return;
-    }
+    reply->deleteLater();
 
-    QByteArray data = reply->readAll();
-    logToFile("=== СЫРОЙ ОТВЕТ ОТ SEARXNG ===");
-    logToFile(QString::fromUtf8(data));
-    logToFile("");
+    // При любой проблеме с поиском — отвечаем без него
+    auto fallback = [this](const QString &why) {
+        logToFile("=== ПОИСК НЕ УДАЛСЯ: " + why + " ===");
+        sendChat(m_lastQuestion, m_lastServerUrl, m_lastHistory, m_lastModelName, 0.6);
+    };
 
+    if (reply->error() != QNetworkReply::NoError)
+        return fallback(reply->errorString());
+
+    const QByteArray data = reply->readAll();
     QJsonParseError parseError;
-    QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
-    if (parseError.error != QJsonParseError::NoError) {
-        logToFile("=== ОШИБКА ПАРСИНГА JSON ===");
-        logToFile("Ошибка: " + parseError.errorString());
-        logToFile("Сырые данные: " + QString::fromUtf8(data));
-        logToFile("");
-        sendMessageWithHistory(m_lastQuestion, m_lastServerUrl, m_lastHistory, m_lastModelName);
-        reply->deleteLater();
-        return;
-    }
+    const QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject())
+        return fallback("ошибка разбора JSON");
 
-    if (!doc.isObject()) {
-        logToFile("=== ОШИБКА: Документ не объект ===");
-        sendMessageWithHistory(m_lastQuestion, m_lastServerUrl, m_lastHistory, m_lastModelName);
-        reply->deleteLater();
-        return;
-    }
+    const QJsonArray results = doc.object()["results"].toArray();
+    if (results.isEmpty())
+        return fallback("нет результатов");
 
-    QJsonObject obj = doc.object();
-    QJsonArray results = obj["results"].toArray();
-
-    if (results.isEmpty()) {
-        logToFile("=== НЕТ РЕЗУЛЬТАТОВ ===");
-        sendMessageWithHistory(m_lastQuestion, m_lastServerUrl, m_lastHistory, m_lastModelName);
-        reply->deleteLater();
-        return;
-    }
-
-    // Формируем результаты с реальным содержанием
     QString searchResults;
     int count = 0;
     for (const QJsonValue &val : results) {
         if (count >= 3) break;
-        QJsonObject result = val.toObject();
-        QString title = result["title"].toString();
+        const QJsonObject result = val.toObject();
+        const QString title = result["title"].toString();
         QString content = result["content"].toString();
-        QString url = result["url"].toString();
-
+        const QString url = result["url"].toString();
         if (title.isEmpty()) continue;
-
-        if (content.length() > 300) {
+        if (content.length() > 300)
             content = content.left(300) + "...";
-        }
 
-        searchResults += QString("--- Результат %1 ---\n")
-                         .arg(count + 1);
+        searchResults += QString("--- Результат %1 ---\n").arg(count + 1);
         searchResults += QString("Заголовок: %1\n").arg(title);
-        if (!content.isEmpty()) {
+        if (!content.isEmpty())
             searchResults += QString("Содержание: %1\n").arg(content);
-        }
-        searchResults += QString("Источник: %1\n").arg(url);
-        searchResults += "\n";
+        searchResults += QString("Источник: %1\n\n").arg(url);
         count++;
     }
- if (searchResults.isEmpty()) {
-        logToFile("=== НЕТ ПОДХОДЯЩИХ РЕЗУЛЬТАТОВ ===");
-        sendMessageWithHistory(m_lastQuestion, m_lastServerUrl, m_lastHistory, m_lastModelName);
-        reply->deleteLater();
-        return;
-    }
+    if (searchResults.isEmpty())
+        return fallback("нет подходящих результатов");
 
-    // ChatML-промпт для поиска
-    QString searchPrompt =
-        "<|im_start|>system\n"
-        "Ты — точный и лаконичный ассистент. Используй результаты поиска, чтобы дать точный ответ. "
-        "Не выдумывай факты вне приведённых источников. Отвечай по-русски.\n"
-        "<|im_end|>\n"
-        "<|im_start|>user\n"
-        "Результаты поиска:\n" + searchResults +
-        "\nВопрос: " + m_lastQuestion + "\n"
-        "<|im_end|>\n"
-        "<|im_start|>assistant\n";
+    const QString extraSystem =
+        "Свежие результаты поиска в интернете (используй их для ответа, "
+        "не выдумывай факты вне этих источников):\n" + searchResults;
 
-    sendToLlama(searchPrompt, m_lastServerUrl, m_lastModelName);
-    reply->deleteLater();
-}
-
-
-void LlamaClient::sendToLlama(const QString &prompt, const QString &serverUrl, const QString &modelName)
-{
-    QJsonObject request;
-    request["prompt"] = prompt;
-    request["n_predict"] = 600;
-    request["temperature"] = 0.2;   // низкая для фактических ответов с поиском
-    request["repeat_penalty"] = 1.1;
-    request["top_p"] = 0.9;
-    request["top_k"] = 40;
-    request["stop"] = QJsonArray::fromStringList({"<|im_end|>", "<|im_start|>"});
-
-    if (!modelName.isEmpty()) {
-        request["model"] = modelName;
-    }
-
-    QNetworkRequest req(QUrl(serverUrl + "/completion"));
-    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-    req.setTransferTimeout(120000); // 2 min
-
-    QJsonDocument doc(request);
-    QByteArray data = doc.toJson();
-
-    logToFile("=== ЗАПРОС В LLAMA (с результатами поиска) ===");
-    logToFile(QString::fromUtf8(data));
-    logToFile("");
-
-    m_manager->post(req, data);
+    sendChat(m_lastQuestion, m_lastServerUrl, m_lastHistory, m_lastModelName,
+             0.2, extraSystem);
 }
 
 void LlamaClient::onReplyFinished(QNetworkReply *reply)
 {
+    reply->deleteLater();
+
     if (reply->error() != QNetworkReply::NoError) {
-        QString error = reply->errorString();
+        const QString error = reply->errorString();
         logToFile("=== ОШИБКА LLAMA ===");
         logToFile(error);
         logToFile("");
         emit errorOccurred(error);
-        reply->deleteLater();
         return;
     }
 
-    QByteArray responseData = reply->readAll();
+    const QByteArray responseData = reply->readAll();
     logToFile("=== ОТВЕТ ОТ LLAMA ===");
     logToFile(QString::fromUtf8(responseData));
     logToFile("");
 
-    QJsonDocument doc = QJsonDocument::fromJson(responseData);
-    if (doc.isObject()) {
-        QJsonObject obj = doc.object();
-        QString content = obj["content"].toString().trimmed();
-
-        // Strip ChatML overflow: stop tokens don't always fire in time,
-        // and the model can generate the next user turn after its own response.
-        // Truncate at the first ChatML marker that isn't part of a valid reply.
-        for (const QString &marker : {
-                 QStringLiteral("<|im_end|>"),
-                 QStringLiteral("<|im_start|>"),
-                 QStringLiteral("Пользователь:")}) {
-            int idx = content.indexOf(marker);
-            if (idx != -1)
-                content = content.left(idx).trimmed();
-        }
-
-        if (content.isEmpty())
-            content = "(нет ответа)";
-
-        emit responseReceived(content);
-    } else {
+    const QJsonDocument doc = QJsonDocument::fromJson(responseData);
+    if (!doc.isObject()) {
         emit errorOccurred("Ошибка разбора ответа");
+        return;
     }
 
-    reply->deleteLater();
+    const QJsonObject obj = doc.object();
+    QString content;
+    const QJsonArray choices = obj["choices"].toArray();
+    if (!choices.isEmpty())
+        content = choices.first().toObject()["message"].toObject()["content"]
+                      .toString().trimmed();
+
+    // Страховка: если модель всё же выдала служебную разметку — обрезаем
+    for (const QString &marker : {
+             QStringLiteral("<|im_end|>"),
+             QStringLiteral("<|im_start|>"),
+             QStringLiteral("Пользователь:")}) {
+        const int idx = content.indexOf(marker);
+        if (idx != -1)
+            content = content.left(idx).trimmed();
+    }
+
+    if (content.isEmpty())
+        content = "(нет ответа)";
+
+    emit responseReceived(content);
 }
 
 void LlamaClient::logToFile(const QString &text)

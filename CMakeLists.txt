@@ -11,11 +11,21 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_RC_COMPILER "")
 set(CMAKE_RC_COMPILER_WORKS FALSE)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Quick Network)
+find_package(Qt6 REQUIRED COMPONENTS Core Quick Network Sql Widgets Multimedia)
 
 set(QML_RESOURCES resources/qml.qrc)
-set(SOURCES src/main.cpp src/llamaclient.cpp src/voiceinput.cpp)
-set(HEADERS src/llamaclient.h src/voiceinput.h)
+# qt_client — тонкий клиент: интерфейс + голос; данные на companion_server
+set(SOURCES
+    src/main.cpp
+    src/musicplayer.cpp
+    src/remotebackend.cpp
+    src/voiceinput.cpp
+)
+set(HEADERS
+    src/musicplayer.h
+    src/remotebackend.h
+    src/voiceinput.h
+)
 
 add_executable(qt_client ${SOURCES} ${HEADERS} ${QML_RESOURCES})
 
@@ -23,11 +33,42 @@ target_link_libraries(qt_client
     Qt6::Core
     Qt6::Quick
     Qt6::Network
+    Qt6::Widgets
+    Qt6::Multimedia
     winmm
 )
 
 if(MSVC)
     target_compile_options(qt_client PRIVATE /Zc:__cplusplus /permissive-)
+endif()
+
+# ── companion_server: безоконный «мозг» для серверной машины ─────────
+# Те же менеджеры без GUI и голоса; клиенты (телефон/десктоп)
+# подключаются к нему по TCP на порт 8765.
+add_executable(companion_server
+    src/main_server.cpp
+    src/chatmanager.cpp
+    src/commandparser.cpp
+    src/databasemanager.cpp
+    src/mentormanager.cpp
+    src/navigationmanager.cpp
+    src/plannermanager.cpp
+    src/syncserver.cpp
+    src/chatmanager.h
+    src/commandparser.h
+    src/databasemanager.h
+    src/mentormanager.h
+    src/navigationmanager.h
+    src/plannermanager.h
+    src/syncserver.h
+)
+target_link_libraries(companion_server
+    Qt6::Core
+    Qt6::Network
+    Qt6::Sql
+)
+if(MSVC)
+    target_compile_options(companion_server PRIVATE /Zc:__cplusplus /permissive-)
 endif()
 
 # Copy Python scripts next to the executable so voice_listener.py and recognize.py are always found.

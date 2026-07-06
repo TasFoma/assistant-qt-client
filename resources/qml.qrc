@@ -1,5 +1,17 @@
 <RCC>
     <qresource prefix="/">
-        <file>../src/main.qml</file>
+        <file>../src/qml/Main.qml</file>
+        <file>../src/qml/ChatPanel.qml</file>
+        <file>../src/qml/SidePanel.qml</file>
+        <file>../src/qml/CalendarPane.qml</file>
+        <file>../src/qml/TasksPane.qml</file>
+        <file>../src/qml/RemindersPane.qml</file>
+        <file>../src/qml/HabitsPane.qml</file>
+        <file>../src/qml/NavStatsPane.qml</file>
+        <file>../src/qml/MusicPane.qml</file>
+        <file>../src/qml/AddEventDialog.qml</file>
+        <file>../src/qml/AddTaskDialog.qml</file>
+        <file>../src/qml/AddReminderDialog.qml</file>
+        <file>../src/qml/AddHabitDialog.qml</file>
     </qresource>
 </RCC>
